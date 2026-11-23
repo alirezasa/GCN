@@ -7,12 +7,17 @@ const {
   Footer, PageNumber, PageBreak, TableOfContents,
 } = require("docx");
 
-const FA_FONT = "Tahoma";
+// فونت فارسی: B Nazanin (برای حروف فارسی/complex script) و Times New Roman برای حروف لاتین
+const FA_FONT = "B Nazanin";
+const LATIN_FONT = "Times New Roman";
 const CODE_FONT = "Consolas";
-const BODY = 21; // 10.5pt
+const BODY = 22; // اندازه لاتین 11pt؛ اندازه فارسی همیشه 2pt بزرگ‌تر (13pt) چون B Nazanin ریز است
+const CS_EXTRA = 4;
 
 const font = (f) => ({ ascii: f, hAnsi: f, cs: f, eastAsia: f });
-const LATIN = /([A-Za-z0-9_\-+*/=^().,:;%'"<>\[\]{}|\\~!?@#$&×→Â·±]+(?:[ \t]+[A-Za-z0-9_\-+*/=^().,:;%'"<>\[\]{}|\\~!?@#$&×→Â·±]+)*)/;
+const faFont = { ascii: LATIN_FONT, hAnsi: LATIN_FONT, cs: FA_FONT, eastAsia: LATIN_FONT };
+// پرانتز و براکت عمداً جزو «تکه لاتین» نیستند تا Word خودش آن‌ها را درست قرینه کند
+const LATIN = /([A-Za-z0-9_\-+*/=^.,:;%'"|\\~!?@#$&×→Â·±]+(?:[ \t]+[A-Za-z0-9_\-+*/=^.,:;%'"|\\~!?@#$&×→Â·±]+)*)/;
 
 // تبدیل متن با نشانه‌گذاری ساده (**پررنگ** و `کد`) به TextRunها
 function runs(text, base = {}) {
@@ -23,18 +28,18 @@ function runs(text, base = {}) {
     if (t.startsWith("**")) { t = t.slice(2, -2); bold = true; }
     else if (t.startsWith("`")) { t = t.slice(1, -1); code = true; }
     if (code) {
-      out.push(new TextRun({ text: t, font: font(CODE_FONT), size: base.size ? base.size - 2 : BODY - 2,
+      out.push(new TextRun({ text: t, font: font(CODE_FONT), size: base.size ? base.size - 3 : BODY - 3,
         color: "A31515", rightToLeft: false }));
       continue;
     }
     // جدا کردن تکه‌های لاتین از فارسی برای نمایش درست جهت متن
     for (const seg of t.split(LATIN).filter((s) => s !== "")) {
       const isLatin = LATIN.test(seg) && !/[؀-ۿ]/.test(seg);
-      // تکه‌های لاتین که فاصله یا علامت دارند (مثل 81.9 ± 0.8) داخل LRE…PDF قرار می‌گیرند تا ترتیبشان به هم نریزد
-      const txt = isLatin && /[^A-Za-z0-9_]/.test(seg.trim()) ? "\u202A" + seg + "\u202C" : seg;
+      // عبارت‌هایی مثل 81.9 ± 0.8 داخل LRE…PDF قرار می‌گیرند تا ترتیبشان به هم نریزد
+      const txt = isLatin && /±/.test(seg) ? "\u202A" + seg + "\u202C" : seg;
       out.push(new TextRun({
         text: txt, bold, boldComplexScript: bold, italics: !!base.italics,
-        font: font(FA_FONT), size: base.size || BODY, sizeComplexScript: base.size || BODY,
+        font: faFont, size: base.size || BODY, sizeComplexScript: (base.size || BODY) + CS_EXTRA,
         color: base.color, rightToLeft: !isLatin,
       }));
     }
@@ -49,7 +54,7 @@ const P = (text, o = {}) => new Paragraph({
 
 const H = (level, text) => new Paragraph({
   heading: [HeadingLevel.HEADING_1, HeadingLevel.HEADING_2, HeadingLevel.HEADING_3][level - 1],
-  bidirectional: true, alignment: AlignmentType.RIGHT,
+  bidirectional: true, alignment: AlignmentType.JUSTIFIED,
   children: runs(text, { bold: true, size: [32, 26, 23][level - 1], color: ["1F3864", "2E5597", "2E5597"][level - 1] }),
 });
 
@@ -96,13 +101,17 @@ function Img(file, widthCm, caption) {
 }
 
 // جدول راست‌به‌چپ
-function Tbl(rows, widthsCm, o = {}) {
+// ورودی ستون‌ها به ترتیب دیداری چپ‌به‌راست نوشته شده‌اند؛ اینجا برعکس می‌شوند و جدول با bidiVisual
+// راست‌به‌چپ می‌شود تا ستون اول (عنوان) در Word و LibreOffice هر دو سمت راست بیاید.
+function Tbl(rowsIn, widthsIn, o = {}) {
+  const rows = rowsIn.map((r) => [...r].reverse());
+  const widthsCm = [...widthsIn].reverse();
   const dxa = widthsCm.map((c) => Math.round(c * 567));
   const total = dxa.reduce((a, b) => a + b, 0);
   const border = { style: BorderStyle.SINGLE, size: 4, color: "999999" };
   const borders = { top: border, bottom: border, left: border, right: border };
   return new Table({
-    width: { size: total, type: WidthType.DXA }, columnWidths: dxa,
+    width: { size: total, type: WidthType.DXA }, columnWidths: dxa, visuallyRightToLeft: true,
     alignment: AlignmentType.CENTER,
     rows: rows.map((r, ri) => new TableRow({
       tableHeader: ri === 0,
@@ -118,43 +127,52 @@ function Tbl(rows, widthsCm, o = {}) {
   });
 }
 
-const Spacer = () => new Paragraph({ children: [] });
+const Spacer = () => new Paragraph({ bidirectional: true, children: [] });
 const Break = () => new Paragraph({ children: [new PageBreak()] });
 
 function makeDoc(children, title) {
   const hstyle = (size, color, before) => ({
-    run: { font: FA_FONT, size, bold: true, color },
+    run: { font: faFont, size, bold: true, color },
     paragraph: { spacing: { before, after: 120 }, keepNext: true },
   });
   return new Document({
     title,
     styles: {
-      default: { document: { run: { font: FA_FONT, size: BODY } },
+      default: { document: { run: { font: faFont, size: BODY } },
         heading1: hstyle(32, "1F3864", 360), heading2: hstyle(26, "2E5597", 240), heading3: hstyle(23, "2E5597", 200) },
     },
     numbering: {
       config: [
         { reference: "bul", levels: [
-          { level: 0, format: LevelFormat.BULLET, text: "●", alignment: AlignmentType.RIGHT,
-            style: { paragraph: { indent: { right: 500, hanging: 280 } }, run: { size: 14 } } },
-          { level: 1, format: LevelFormat.BULLET, text: "○", alignment: AlignmentType.RIGHT,
-            style: { paragraph: { indent: { right: 1000, hanging: 280 } }, run: { size: 14 } } }] },
+          { level: 0, format: LevelFormat.BULLET, text: "●", alignment: AlignmentType.START,
+            style: { paragraph: { indent: { start: 500, hanging: 280 } }, run: { size: 14 } } },
+          { level: 1, format: LevelFormat.BULLET, text: "○", alignment: AlignmentType.START,
+            style: { paragraph: { indent: { start: 1000, hanging: 280 } }, run: { size: 14 } } }] },
         ...["num", "num2", "num3", "num4", "num5"].map((ref) => ({ reference: ref, levels: [
-          { level: 0, format: LevelFormat.DECIMAL, text: "%1.", alignment: AlignmentType.RIGHT,
-            style: { paragraph: { indent: { right: 500, hanging: 320 } } } }] })),
+          { level: 0, format: LevelFormat.DECIMAL, text: "%1.", alignment: AlignmentType.START,
+            style: { paragraph: { indent: { start: 500, hanging: 320 } }, run: { font: faFont } } }] })),
       ],
     },
     sections: [{
       properties: { page: { size: { width: 11906, height: 16838 }, margin: { top: 1300, bottom: 1300, left: 1250, right: 1250 } } },
       footers: { default: new Footer({ children: [new Paragraph({ alignment: AlignmentType.CENTER,
-        children: [new TextRun({ children: [PageNumber.CURRENT], font: font(FA_FONT), size: 18 })] })] }) },
+        children: [new TextRun({ children: [PageNumber.CURRENT], font: faFont, size: 20, sizeComplexScript: 24 })] })] }) },
       children,
     }],
   });
 }
 
+// تنظیمات تکمیلی XML: زبان پیش‌فرض فارسی، جهت بخش (section) راست‌به‌چپ
 async function save(doc, file) {
-  fs.writeFileSync(file, await Packer.toBuffer(doc));
+  const JSZip = require(require.resolve("jszip", { paths: [path.dirname(require.resolve("docx")), ...module.paths] }));
+  const zip = await JSZip.loadAsync(await Packer.toBuffer(doc));
+  let styles = await zip.file("word/styles.xml").async("string");
+  styles = styles.replace(/<w:rPrDefault>\s*<w:rPr>/, (m) => m + '<w:lang w:val="en-US" w:eastAsia="en-US" w:bidi="fa-IR"/>');
+  zip.file("word/styles.xml", styles);
+  let docXml = await zip.file("word/document.xml").async("string");
+  docXml = docXml.replace(/(<w:sectPr[^>]*>)([\s\S]*?)(<\/w:sectPr>)/, (m, a, b, c) => a + b + "<w:bidi/>" + c);
+  zip.file("word/document.xml", docXml);
+  fs.writeFileSync(file, await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" }));
   console.log("saved", file);
 }
 
